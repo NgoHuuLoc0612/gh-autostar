@@ -26,7 +26,7 @@ run on OS startup, cache everything in SQLite, and filter with precision.
 ```bash
 pip install gh-autostar
 # or, for development:
-git clone https://github.com/gh-autostar/gh-autostar
+git clone https://github.com/NgoHuuLoc0612/gh-autostar
 cd gh-autostar
 pip install -e ".[dev]"
 ```
