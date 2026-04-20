@@ -10,13 +10,14 @@ Token storage priority (highest → lowest):
 
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal
 
 from platformdirs import user_config_dir, user_data_dir, user_log_dir
 from pydantic import Field, SecretStr, field_validator, model_validator
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic_settings import BaseSettings, PydanticBaseSettingsSource, SettingsConfigDict
 
 _APP_NAME = "gh-autostar"
 
@@ -56,6 +57,100 @@ def _resolve_token() -> str:
         return token
     token = os.environ.get("GITHUB_TOKEN", "")
     return token
+
+
+# ── .env sanitiser ────────────────────────────────────────────────────────────
+# pydantic-settings calls json.loads() on list[str] fields from .env files.
+# If the value is a plain string like "a@b.com" (not a JSON array), it crashes.
+# We fix the .env file IN-PLACE before pydantic-settings reads it so that all
+# list fields are stored as JSON arrays: ["a@b.com"]
+
+# Fields that pydantic-settings will try to json.loads()
+_LIST_ENV_KEYS = {
+    "GH_AUTOSTAR_DIGEST_RECIPIENTS",
+    "GH_AUTOSTAR_EXCLUDE_OWNERS",
+    "GH_AUTOSTAR_TOPIC_SEARCH_TERMS",
+    "GH_AUTOSTAR_MANUAL_REPOS",
+    "GH_AUTOSTAR_LANGUAGES",
+    "GH_AUTOSTAR_REQUIRE_TOPICS",
+    "GH_AUTOSTAR_ANY_TOPICS",
+    "GH_AUTOSTAR_SOURCES",
+}
+
+
+def _sanitise_env_file(path: Path) -> None:
+    """
+    Read the .env file and rewrite any list fields that are not valid JSON arrays.
+    Called once at startup — fast no-op if file is already correct.
+    """
+    if not path.exists():
+        return
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except Exception:
+        return
+
+    changed = False
+    out: list[str] = []
+    for line in lines:
+        if "=" not in line or line.startswith("#"):
+            out.append(line)
+            continue
+        k, _, v = line.partition("=")
+        k = k.strip()
+        v = v.strip()
+        if k in _LIST_ENV_KEYS:
+            # Already a valid JSON array → leave alone
+            if v.startswith("["):
+                try:
+                    json.loads(v)
+                    out.append(line)
+                    continue
+                except Exception:
+                    pass
+            # Fix: convert to JSON array
+            if v:
+                items = [item.strip() for item in v.split(",") if item.strip()]
+            else:
+                items = []
+            fixed = json.dumps(items)
+            out.append(f"{k}={fixed}")
+            changed = True
+        else:
+            out.append(line)
+
+    if changed:
+        try:
+            path.write_text("\n".join(out) + "\n", encoding="utf-8")
+        except Exception:
+            pass  # read-only fs edge case — ignore
+
+
+class _SanitisedDotEnvSource(PydanticBaseSettingsSource):
+    """Thin wrapper — sanitises the .env file before the real source reads it."""
+
+    def __init__(
+        self,
+        settings_cls: type[BaseSettings],
+        dotenv_source: PydanticBaseSettingsSource,
+    ) -> None:
+        super().__init__(settings_cls)
+        self._inner = dotenv_source
+
+    def get_field_value(self, field_name: str, field_info: Any) -> Any:
+        return self._inner.get_field_value(field_name, field_info)
+
+    def __call__(self) -> dict[str, Any]:
+        # Sanitise first, then delegate
+        _sanitise_env_file(_config_dir() / ".env")
+        try:
+            return self._inner()
+        except Exception:
+            return {}
+
+    def field_is_complex(self, field: Any) -> bool:
+        return self._inner.field_is_complex(field)
+
 
 
 class Settings(BaseSettings):
@@ -267,9 +362,35 @@ class Settings(BaseSettings):
     @classmethod
     def _normalise_list(cls, v: object) -> list[str]:
         if isinstance(v, str):
+            v = v.strip()
+            # Accept JSON array format written by save_env
+            if v.startswith("["):
+                import json as _j
+                try:
+                    return [str(x).strip().lower() for x in _j.loads(v)]
+                except Exception:
+                    pass
             return [item.strip().lower() for item in v.split(",") if item.strip()]
         if isinstance(v, list):
             return [str(item).strip().lower() for item in v]
+        return []
+
+    @field_validator("digest_recipients", "exclude_owners", "topic_search_terms",
+                     "manual_repos", "sources", mode="before")
+    @classmethod
+    def _normalise_str_list(cls, v: object) -> list[str]:
+        """Accept both JSON array ["a","b"] and comma-separated a,b formats."""
+        if isinstance(v, str):
+            v = v.strip()
+            if v.startswith("["):
+                import json as _j
+                try:
+                    return [str(x).strip() for x in _j.loads(v) if str(x).strip()]
+                except Exception:
+                    pass
+            return [item.strip() for item in v.split(",") if item.strip()]
+        if isinstance(v, list):
+            return [str(x).strip() for x in v if str(x).strip()]
         return []
 
     @field_validator("manual_repos", mode="before")
@@ -309,6 +430,23 @@ class Settings(BaseSettings):
     @property
     def log_dir(self) -> Path:
         return _log_dir()
+
+
+    @classmethod
+    def settings_customise_sources(
+        cls,
+        settings_cls: type[BaseSettings],
+        init_settings: PydanticBaseSettingsSource,
+        env_settings: PydanticBaseSettingsSource,
+        dotenv_settings: PydanticBaseSettingsSource,
+        file_secret_settings: PydanticBaseSettingsSource,
+    ) -> tuple[PydanticBaseSettingsSource, ...]:
+        return (
+            init_settings,
+            env_settings,
+            _SanitisedDotEnvSource(settings_cls, dotenv_settings),
+            file_secret_settings,
+        )
 
     def save_token(self, token: str) -> bool:
         """
@@ -355,7 +493,10 @@ class Settings(BaseSettings):
             if isinstance(val, SecretStr):
                 lines[env_key] = val.get_secret_value()
             elif isinstance(val, list):
-                lines[env_key] = ",".join(str(x) for x in val)
+                import json as _json
+                # pydantic-settings requires JSON array format for list[str] fields
+                # e.g. ["a@b.com","c@d.com"]  NOT  a@b.com,c@d.com
+                lines[env_key] = _json.dumps([str(x) for x in val])
             elif isinstance(val, bool):
                 lines[env_key] = "true" if val else "false"
             else:
@@ -413,5 +554,8 @@ def get_settings(reload: bool = False) -> Settings:
     """Return the cached (or fresh) Settings singleton."""
     global _settings_instance
     if _settings_instance is None or reload:
+        # Sanitise .env BEFORE pydantic-settings reads it — fixes list fields
+        # written as plain strings to JSON arrays that pydantic-settings requires.
+        _sanitise_env_file(_config_dir() / ".env")
         _settings_instance = Settings()
     return _settings_instance
