@@ -1,0 +1,84 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "gh-autostar"
+version = "1.0.0"
+description = "Automated GitHub repository starring with batch processing, scheduling, caching, and advanced filtering"
+readme = "README.md"
+license = { file = "LICENSE" }
+requires-python = ">=3.10"
+authors = [{ name = "gh-autostar contributors" }]
+keywords = ["github", "stars", "automation", "batch", "scheduler"]
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development :: Libraries",
+    "Topic :: Utilities",
+]
+dependencies = [
+    "httpx",
+    "rich",
+    "typer",
+    "pydantic",
+    "pydantic-settings",
+    "apscheduler",
+    "keyring",
+    "tenacity",
+    "python-dotenv",
+    "platformdirs",
+    "tabulate",
+    "humanize",
+    "dash",
+    "plotly",
+    "pandas",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "pytest-asyncio",
+    "pytest-httpx",
+    "pytest-cov",
+    "ruff",
+    "mypy",
+    "types-tabulate",
+]
+
+[project.scripts]
+gh-autostar = "gh_autostar.cli.main:app"
+
+[project.urls]
+Homepage = "https://github.com/NgoHuuLoc0612/gh-autostar"
+Repository = "https://github.com/NgoHuuLoc0612/gh-autostar"
+Issues = "https://github.com/NgoHuuLoc0612/gh-autostar/issues"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["gh_autostar*"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "UP", "ANN", "B", "SIM"]
+ignore = ["ANN101", "ANN102"]
+
+[tool.mypy]
+python_version = "3.10"
+strict = true
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+addopts = "--cov=gh_autostar --cov-report=term-missing"
